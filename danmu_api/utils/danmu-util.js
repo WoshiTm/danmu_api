@@ -127,7 +127,7 @@ export function handleDanmusLike(groupedDanmus) {
 
     // 确定阈值：特定源中>=100用🔥，其他>=1000用🔥
     const threshold = isLowThresholdSource ? 100 : 1000;
-    const icon = item.like >= threshold ? '🔥' : '️\u200A♡';
+    const icon = item.like >= threshold ? '🔥' : '️♡';
 
     // 格式化点赞数，缩写显示
     let formattedLike;
@@ -143,7 +143,7 @@ export function handleDanmusLike(groupedDanmus) {
     }
 
     // 在弹幕内容m字段后面添加点赞信息
-    const likeText = `${icon}${formattedLike}`;
+    const likeText = `\u200A${icon}${formattedLike}`;
     const newM = item.m + likeText;
 
     // 创建新对象，复制原属性，更新m字段，并删除like字段
