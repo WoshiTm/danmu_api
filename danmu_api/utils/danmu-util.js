@@ -345,8 +345,7 @@ export function convertToDanmakuJson(contents, platform) {
         modified = true;
       }
       // 2.2 将白色弹幕转换为随机颜色，白、红、橙、黄、绿、青、蓝、紫、粉（模拟真实情况，增加白色出现概率）
-      let colors = [16777215, 16777215, 16777215, 16777215, 16777215, 16777215, 16777215, 16777215, 
-                    16744319, 16752762, 16774799, 9498256, 8388564, 8900346, 14204888, 16758465];
+      let colors = globals.colorPool.split(',').map(c => parseInt(c.trim(), 10)).filter(c => !isNaN(c) && c >= 0 && c <= 16777215);
       let randomColor = colors[Math.floor(Math.random() * colors.length)];
       if (globals.convertColor === 'color' && color === 16777215 && color !== randomColor) {
         colorCount++;
@@ -503,57 +502,4 @@ export function formatDanmuResponse(danmuData, queryFormat) {
 
   // 默认返回 JSON
   return jsonResponse(danmuData);
-}
-
-// 解析偏移量配置
-function parseOffset(env) {
-  const map = new Map();
-  if (!env) return map;
-  for (const entry of env.split(',')) {
-    const [path, sec] = entry.trim().split(':');
-    if (path && sec !== undefined) {
-      const normalizedPath = path.trim().split('/').map((segment, index) => {
-        if (index === 0) return segment; // 剧名不处理
-        const seasonMatch = segment.match(/^S(\d+)$/i);
-        if (seasonMatch) return `S${String(parseInt(seasonMatch[1])).padStart(2, '0')}`;
-        const episodeMatch = segment.match(/^E(\d+)$/i);
-        if (episodeMatch) return `E${String(parseInt(episodeMatch[1])).padStart(2, '0')}`;
-        return segment;
-      }).join('/');
-      map.set(normalizedPath, parseInt(sec));
-    }
-  }
-  return map;
-}
-
-// 获取偏移量
-export function getOffset(anime, season, episode) {
-  const map = parseOffset(globals.danmuOffset);
-  log("info", `getOffset params: ${anime}, ${season}, ${episode}`);
-  log("info", `getOffset map: ${JSON.stringify([...map])}`);
-  return (
-    map.get(`${anime}/${season}/${episode}`) ??  // 集级
-    map.get(`${anime}/${season}`) ??             // 季级
-    map.get(anime) ??                            // 剧级
-    0
-  );
-}
-
-// 应用弹幕时间偏移
-export function applyDanmuOffset(danmus, offset) {
-  if (offset === 0) return danmus;
-  
-  return danmus.map(danmu => {
-    // 解析时间参数
-    const pValues = danmu.p.split(',');
-    const time = parseFloat(pValues[0]) || 0;
-    const newTime = Math.max(0, time + offset); // 确保时间不为负数
-    pValues[0] = newTime.toFixed(3); // 保留3位小数
-    
-    return {
-      ...danmu,
-      p: pValues.join(','),
-      t: newTime // 如果有t字段也更新
-    };
-  });
 }
