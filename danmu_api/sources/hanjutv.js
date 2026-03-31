@@ -812,7 +812,7 @@ export default class HanjutvSource extends BaseSource {
     return new SegmentListResponse({
       type: "hanjutv",
       duration: 0,
-      segmentList: [],
+      segmentList: [{ type: "hanjutv", segment_start: 0, segment_end: 30000, url: id }],
     });
   }
 
