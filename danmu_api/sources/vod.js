@@ -14,7 +14,7 @@ export default class VodSource extends BaseSource {
   async getVodAnimes(title, server, serverName) {
     try {
       const response = await httpGet(
-        `${server}/api.php/provide/vod/?ac=detail&wd=${title}&pg=1`,
+        `${server}/api.php/provide/vod/?wd=${title}&ac=detail&pg=1`,
         {
           headers: {
             "Content-Type": "application/json",
