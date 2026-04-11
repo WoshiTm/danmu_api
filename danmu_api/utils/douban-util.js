@@ -2,220 +2,111 @@ import { log } from './log-util.js'
 import { httpGet, httpPost } from "./http-util.js";
 import { globals } from '../configs/globals.js';
 
-// =====================
-// Rexxar GET 基础请求
-// =====================
+// --- 基础 GET 请求 (前缀: https://m.douban.com/rexxar/api/v2) ---
 async function doubanApiGet(url) {
   const doubanApi = "https://m.douban.com/rexxar/api/v2";
-
   const headers = {
     "Referer": "https://m.douban.com/movie/",
     "Content-Type": "application/json",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
   };
 
-  if (globals.doubanCookie) {
-    headers["Cookie"] = globals.doubanCookie;
-  }
+  if (globals.doubanCookie) headers["Cookie"] = globals.doubanCookie;
 
   try {
-    const response = await httpGet(`${doubanApi}${url}`, {
-      method: 'GET',
-      headers
-    });
-
-    // 状态归类
-    if (!response) {
-      log("warn", "[DOUBAN] request failed → fallback will be used");
-      return null;
-    }
-
-    if (response.status === 403) {
-      log("warn", "[DOUBAN] blocked (403) → fallback triggered");
-      return { blocked: true };
-    }
-
-    if (response.status !== 200) {
-      log("warn", `[DOUBAN] request non-200 (${response.status}) → fallback`);
-      return null;
-    }
-
+    const response = await httpGet(`${doubanApi}${url}`, { method: 'GET', headers });
+    // 403 时静默返回，不打印错误日志
+    if (response && response.status === 403) return { status: 403, data: null };
+    if (!response || response.status !== 200) return null;
     return response;
-
-  } catch {
-    // 不输出错误
-    log("warn", "[DOUBAN] request exception → fallback triggered");
+  } catch (error) {
+    log("error", "[DOUBAN] GET API unexpected error:", error.message);
     return null;
   }
 }
 
-// =====================
-// Suggest fallback
-// =====================
+// --- 降级搜索接口 (Suggest API) ---
 async function doubanSuggestFallback(keyword) {
-  log("info", `[DOUBAN] fallback start: ${keyword}`);
-
   const url = `https://movie.douban.com/j/subject_suggest?q=${encodeURIComponent(keyword)}`;
-
   try {
     const res = await httpGet(url, {
       method: "GET",
       headers: {
         "Referer": "https://movie.douban.com/",
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
       }
     });
-
-    if (!res || res.status !== 200) {
-      log("warn", "[DOUBAN] fallback request failed (non-200)");
-      return [];
-    }
-
-    const data = Array.isArray(res.data) ? res.data : [];
-
-    log("info", `[DOUBAN] fallback success: ${data.length} items`);
-
-    return data;
-
-  } catch {
-    log("warn", "[DOUBAN] fallback exception (ignored)");
+    return (res && res.status === 200 && Array.isArray(res.data)) ? res.data : [];
+  } catch (error) {
+    log("error", "[DOUBAN] Suggest Fallback Error:", error.message);
     return [];
   }
 }
 
-// =====================
-// 搜索入口
-// =====================
+// --- 搜索入口 ---
 export async function searchDoubanTitles(keyword, count = 20) {
   const url = `/search?q=${encodeURIComponent(keyword)}&start=0&count=${count}&type=movie`;
-
   const res = await doubanApiGet(url);
 
-  const subjects = res?.data?.subjects;
+  if (res && res.status === 200 && res.data?.subjects) return res.data.subjects;
 
-  if (Array.isArray(subjects) && subjects.length > 0) {
-    log("info", `[DOUBAN] search success: ${subjects.length}`);
-    return {
-      status: 200,
-      data: { subjects }
-    };
-  }
+  // 触发降级：转换数据结构以兼容后续逻辑
+  const fallbackList = await doubanSuggestFallback(keyword);
+  return fallbackList.map(item => ({
+    id: item.id,
+    title: item.title,
+    pic: { normal: item.img }
+  }));
+}
 
-  log("warn", "[DOUBAN] search failed → using suggest fallback");
+// --- 获取详情 (使用指定的 /subject/ 路径) ---
+export async function getDoubanDetail(doubanId) {
+  // 拼接结果: https://m.douban.com/rexxar/api/v2/subject/ID?for_mobile=1
+  const url = `/subject/${doubanId}?for_mobile=1`;
+  const res = await doubanApiGet(url);
+  return (res && res.status === 200) ? res.data : null;
+}
 
-  const fallbackData = await doubanSuggestFallback(keyword);
+// --- 智能集成入口 (自动执行：搜索 -> 提取 ID -> 请求详情) ---
+export async function getDoubanSmartDetail(keyword) {
+  const list = await searchDoubanTitles(keyword);
+  if (!list || list.length === 0) return null;
 
-  return {
-    status: 200,
-    data: { subjects: fallbackData },
-    source: "suggest"
+  // 匹配最接近的条目并提取 id
+  const bestMatch = list.find(item => item.title === keyword) || list[0];
+  if (!bestMatch?.id) return null;
+
+  // 执行下一步：获取详情
+  const detail = await getDoubanDetail(bestMatch.id);
+
+  // 详情接口若也 403，则返回搜索阶段拿到的基础数据兜底
+  return detail || {
+    id: bestMatch.id,
+    title: bestMatch.title,
+    pic: bestMatch.pic,
+    is_partial: true 
   };
 }
 
-// =====================
-// 详情接口
-// =====================
-export async function getDoubanDetail(doubanId) {
-  const url = `/subject/${doubanId}?for_mobile=1`;
-
-  log("info", `[DOUBAN] fetching detail: ${doubanId}`);
-
-  return await doubanApiGet(url);
-}
-
-// =====================
-// IMDb（保留原逻辑）
-// =====================
+// --- V2 POST (IMDB反查) ---
 export async function getDoubanInfoByImdbId(imdbId) {
-  const url = `/movie/imdb/${imdbId}`;
-  return await doubanApiPost(url);
-}
-
-// =====================
-// POST（保留）
-// =====================
-async function doubanApiPost(url, data = {}) {
   const doubanApi = "https://api.douban.com/v2";
-
   try {
     const response = await httpPost(
-      `${doubanApi}${url}`,
-      JSON.stringify({
-        ...data,
-        apikey: "0ac44ae016490db2204ce0a042db2916"
-      }),
+      `${doubanApi}/movie/imdb/${imdbId}`,
+      JSON.stringify({ apikey: "0ac44ae016490db2204ce0a042db2916" }),
       {
         method: 'POST',
         headers: {
           "Referer": "https://api.douban.com",
           "Content-Type": "application/json",
-          "User-Agent": "Mozilla/5.0"
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
       }
     );
-
     return (response && response.status === 200) ? response : null;
-
-  } catch {
-    log("warn", "[DOUBAN] POST request failed");
+  } catch (error) {
+    log("error", "[DOUBAN] IMDB API error:", error.message);
     return null;
   }
-}
-
-// =====================
-// 归一化匹配（稳定版）
-// =====================
-function normalize(str) {
-  return (str || "")
-    .replace(/[，,。.！!？?\s_-]/g, "")
-    .toLowerCase();
-}
-
-function matchSuggest(list, keyword) {
-  if (!Array.isArray(list) || list.length === 0) return null;
-
-  const k = normalize(keyword);
-
-  const exact = list.find(item =>
-    normalize(item.title) === k ||
-    normalize(item.sub_title) === k
-  );
-
-  if (exact) return exact;
-
-  const fuzzy = list.find(item => {
-    const t = normalize(item.title);
-    const s = normalize(item.sub_title);
-
-    return t.includes(k) || k.includes(t) ||
-           s.includes(k) || k.includes(s);
-  });
-
-  return fuzzy || list[0];
-}
-
-// =====================
-// 最终智能入口
-// =====================
-export async function getDoubanSmartDetail(keyword) {
-  log("info", `[DOUBAN] smart search start: ${keyword}`);
-
-  const searchRes = await searchDoubanTitles(keyword);
-  const list = searchRes?.data?.subjects || [];
-
-  if (list.length === 0) {
-    log("warn", "[DOUBAN] empty result after fallback");
-    return null;
-  }
-
-  const bestMatch = matchSuggest(list, keyword);
-
-  if (!bestMatch?.id) {
-    log("warn", "[DOUBAN] no valid match found");
-    return null;
-  }
-
-  log("info", `[DOUBAN] match → ${bestMatch.title} (${bestMatch.id})`);
-
-  return await getDoubanDetail(bestMatch.id);
 }
