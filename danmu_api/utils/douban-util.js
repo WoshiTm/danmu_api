@@ -1,159 +1,83 @@
 import { log } from './log-util.js'
-import { httpGet, httpPost } from "./http-util.js";
+import {httpGet, httpPost} from "./http-util.js";
 import { globals } from '../configs/globals.js';
 
-// =====================
-// 基础 GET
-// =====================
-async function doubanApiGet(url) {
-  const base = "https://m.douban.com/rexxar/api/v2";
+// ---------------------
+// 豆瓣 API 工具方法
+// ---------------------
 
+// 豆瓣 API GET 请求
+async function doubanApiGet(url) {
+  const doubanApi = "https://m.douban.com/rexxar/api/v2";
   const headers = {
     "Referer": "https://m.douban.com/movie/",
     "Content-Type": "application/json",
-    "User-Agent": "Mozilla/5.0"
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
   };
 
-  if (globals.doubanCookie) headers["Cookie"] = globals.doubanCookie;
+  if (globals.doubanCookie) {
+    headers["Cookie"] = globals.doubanCookie;
+  }
 
   try {
-    const res = await httpGet(`${base}${url}`, {
-      method: "GET",
+    const response = await httpGet(`${doubanApi}${url}`, {
+      method: 'GET',
       headers
     });
+    if (response.status != 200) return null;
 
-    if (res && res.status === 403) {
-      return { status: 403, data: null };
-    }
-
-    if (!res || res.status !== 200) return null;
-
-    return res;
-  } catch (err) {
-    log("error", "[DOUBAN] GET error:", err.message);
+    return response;
+  } catch (error) {
+    log("error", "[DOUBAN] GET API error:", {
+      message: error.message,
+      name: error.name,
+      stack: error.stack,
+    });
     return null;
   }
 }
 
-// =====================
-// fallback suggest
-// =====================
-async function doubanSuggestFallback(keyword) {
-  const url = `https://movie.douban.com/j/subject_suggest?q=${encodeURIComponent(keyword)}`;
+// 豆瓣 API POST 请求
+async function doubanApiPost(url, data={}) {
+  const doubanApi = "https://api.douban.com/v2";
 
   try {
-    const res = await httpGet(url, {
-      method: "GET",
+    const response = await httpPost(`${doubanApi}${url}`,
+        JSON.stringify({...data, apikey: "0ac44ae016490db2204ce0a042db2916"}), {
+      method: 'GET',
       headers: {
-        "Referer": "https://movie.douban.com/",
-        "User-Agent": "Mozilla/5.0"
+        "Referer": "https://api.douban.com",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
       }
     });
+    if (response.status != 200) return null;
 
-    if (!res || res.status !== 200 || !Array.isArray(res.data)) return [];
-
-    return res.data;
-  } catch (err) {
-    log("error", "[DOUBAN] suggest error:", err.message);
-    return [];
-  }
-}
-
-// =====================
-// 🔥 统一结构（关键修复）
-// =====================
-function normalize(item) {
-  return {
-    layout: "subject",
-
-    // 👉 关键：保证一定有 id
-    target_id: item.id || item.target_id,
-
-    type_name: item.type_name || "电影",
-
-    target: {
-      title: item.title || item.target?.title || "",
-      cover_url: item.img || item.pic?.normal || item.target?.cover_url || ""
-    }
-  };
-}
-
-// =====================
-// search（只改这里就够）
-// =====================
-export async function searchDoubanTitles(keyword, count = 20) {
-  const url = `/search?q=${encodeURIComponent(keyword)}&start=0&count=${count}&type=movie`;
-
-  const res = await doubanApiGet(url);
-
-  let list = [];
-
-  // ✅ 正常 search
-  if (res?.status === 200 && res.data?.subjects?.length) {
-    list = res.data.subjects;
-  } else {
-    // ❗ fallback
-    list = await doubanSuggestFallback(keyword);
-  }
-
-  // 🔥 统一结构输出（关键）
-  return list
-    .map(normalize)
-    .filter(i => i.target_id); // 防止脏数据
-}
-
-// =====================
-// detail（不动）
-// =====================
-export async function getDoubanDetail(id) {
-  const url = `/subject/${id}?for_mobile=1`;
-
-  const res = await doubanApiGet(url);
-  return res?.status === 200 ? res.data : null;
-}
-
-// =====================
-// smart detail（不动）
-// =====================
-export async function getDoubanSmartDetail(keyword) {
-  const list = await searchDoubanTitles(keyword);
-  if (!list.length) return null;
-
-  const best = list[0];
-
-  const detail = await getDoubanDetail(best.target_id);
-
-  return detail || {
-    id: best.target_id,
-    title: best.target?.title,
-    pic: best.target?.cover_url,
-    is_partial: true
-  };
-}
-
-// =====================
-// imdb（不动）
-// =====================
-export async function getDoubanInfoByImdbId(imdbId) {
-  const base = "https://api.douban.com/v2";
-
-  try {
-    const res = await httpPost(
-      `${base}/movie/imdb/${imdbId}`,
-      JSON.stringify({ apikey: "0ac44ae016490db2204ce0a042db2916" }),
-      {
-        method: "POST",
-        headers: {
-          "Referer": "https://api.douban.com",
-          "Content-Type": "application/json",
-          "User-Agent": "Mozilla/5.0"
-        }
-      }
-    );
-
-    return res?.status === 200 ? res : null;
-  } catch (err) {
-    log("error", "[DOUBAN] imdb error:", err.message);
+    return response;
+  } catch (error) {
+    log("error", "[DOUBAN] POST API error:", {
+      message: error.message,
+      name: error.name,
+      stack: error.stack,
+    });
     return null;
   }
+}
+
+// 使用 豆瓣 API 查询片名
+export async function searchDoubanTitles(keyword, count = 20) {
+  const url = `/search?q=${keyword}&start=0&count=${count}&type=movie`;
+  return await doubanApiGet(url);
+}
+
+// 使用 豆瓣 API 查询详情
+export async function getDoubanDetail(doubanId) {
+  const url = `/movie/${doubanId}?for_mobile=1`;
+  return await doubanApiGet(url);
+}
+
+// 通过 imdbId 使用 豆瓣 API 查询 doubanInfo
+export async function getDoubanInfoByImdbId(imdbId) {
+  const url = `/movie/imdb/${imdbId}`;
+  return await doubanApiPost(url);
 }
