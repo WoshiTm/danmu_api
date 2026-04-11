@@ -1,12 +1,8 @@
 import { log } from './log-util.js'
-import {httpGet, httpPost} from "./http-util.js";
+import { httpGet, httpPost } from "./http-util.js";
 import { globals } from '../configs/globals.js';
 
-// ---------------------
-// 豆瓣 API 工具方法
-// ---------------------
-
-// 豆瓣 API GET 请求
+// --- Rexxar GET 请求基础方法 ---
 async function doubanApiGet(url) {
   const doubanApi = "https://m.douban.com/rexxar/api/v2";
   const headers = {
@@ -20,64 +16,105 @@ async function doubanApiGet(url) {
   }
 
   try {
-    const response = await httpGet(`${doubanApi}${url}`, {
-      method: 'GET',
-      headers
-    });
-    if (response.status != 200) return null;
-
+    const response = await httpGet(`${doubanApi}${url}`, { method: 'GET', headers });
+    if (!response || response.status != 200) return null;
     return response;
   } catch (error) {
-    log("error", "[DOUBAN] GET API error:", {
-      message: error.message,
-      name: error.name,
-      stack: error.stack,
-    });
+    log("error", "[DOUBAN] GET API error:", error.message);
     return null;
   }
 }
 
-// 豆瓣 API POST 请求
-async function doubanApiPost(url, data={}) {
-  const doubanApi = "https://api.douban.com/v2";
-
+// --- Suggest 接口降级方法 ---
+async function doubanSuggestFallback(keyword) {
+  const url = `https://movie.douban.com/j/subject_suggest?q=${encodeURIComponent(keyword)}`;
   try {
-    const response = await httpPost(`${doubanApi}${url}`,
-        JSON.stringify({...data, apikey: "0ac44ae016490db2204ce0a042db2916"}), {
-      method: 'GET',
+    const res = await httpGet(url, {
+      method: "GET",
       headers: {
-        "Referer": "https://api.douban.com",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "Referer": "https://movie.douban.com/",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
       }
     });
-    if (response.status != 200) return null;
-
-    return response;
+    if (!res || res.status !== 200) return [];
+    return Array.isArray(res.data) ? res.data : [];
   } catch (error) {
-    log("error", "[DOUBAN] POST API error:", {
-      message: error.message,
-      name: error.name,
-      stack: error.stack,
-    });
-    return null;
+    log("error", "[DOUBAN] suggest fallback error:", error.message);
+    return [];
   }
 }
 
-// 使用 豆瓣 API 查询片名
+// --- 搜索入口 ---
 export async function searchDoubanTitles(keyword, count = 20) {
-  const url = `/search?q=${keyword}&start=0&count=${count}&type=movie`;
-  return await doubanApiGet(url);
+  const url = `/search?q=${encodeURIComponent(keyword)}&start=0&count=${count}&type=movie`;
+  const res = await doubanApiGet(url);
+
+  if (res && res.data?.subjects) {
+    return res;
+  }
+
+  log("warn", "[DOUBAN] search fallback triggered");
+  const fallbackData = await doubanSuggestFallback(keyword);
+
+  return {
+    status: 200,
+    data: { subjects: fallbackData }
+  };
 }
 
-// 使用 豆瓣 API 查询详情
+// --- 获取详情 ---
 export async function getDoubanDetail(doubanId) {
-  const url = `/movie/${doubanId}?for_mobile=1`;
+  const url = `/subject/${doubanId}?for_mobile=1`;
   return await doubanApiGet(url);
 }
 
-// 通过 imdbId 使用 豆瓣 API 查询 doubanInfo
+// --- IMDB 查询 ---
 export async function getDoubanInfoByImdbId(imdbId) {
   const url = `/movie/imdb/${imdbId}`;
   return await doubanApiPost(url);
+}
+
+// --- 基础 POST 请求方法 ---
+async function doubanApiPost(url, data = {}) {
+  const doubanApi = "https://api.douban.com/v2";
+  try {
+    const response = await httpPost(
+      `${doubanApi}${url}`,
+      JSON.stringify({ ...data, apikey: "0ac44ae016490db2204ce0a042db2916" }),
+      {
+        method: 'POST',
+        headers: {
+          "Referer": "https://api.douban.com",
+          "Content-Type": "application/json",
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+      }
+    );
+    return (response && response.status == 200) ? response : null;
+  } catch (error) {
+    log("error", "[DOUBAN] POST API error:", error.message);
+    return null;
+  }
+}
+
+// --- 列表匹配算法 ---
+function matchSuggest(list, keyword) {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const exact = list.find(item => item.title === keyword);
+  if (exact) return exact;
+  const fuzzy = list.find(item => item.title?.includes(keyword) || keyword.includes(item.title));
+  return fuzzy || list[0];
+}
+
+// --- 最终集成智能入口 ---
+export async function getDoubanSmartDetail(keyword) {
+  const searchRes = await searchDoubanTitles(keyword);
+  const list = searchRes?.data?.subjects;
+
+  if (!list || list.length === 0) return null;
+
+  const bestMatch = matchSuggest(list, keyword);
+  if (!bestMatch?.id) return null;
+
+  return await getDoubanDetail(bestMatch.id);
 }
