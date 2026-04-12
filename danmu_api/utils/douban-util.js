@@ -50,7 +50,7 @@ export async function getDoubanDetail(doubanId) {
 }
 
 // =====================================================
-// 降级接口
+// 降级接口：subject_suggest
 // =====================================================
 async function searchDoubanSuggest(keyword) {
   try {
@@ -59,14 +59,18 @@ async function searchDoubanSuggest(keyword) {
     const response = await httpGet(url, {
       method: 'GET',
       headers: {
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://movie.douban.com/"
       }
     });
 
-    if (response.status != 200) return [];
-
-    const data = response.data;
+    // 兼容不同的 http 工具类返回格式（有的包一层 data，有的直接返回结果）
+    let data = response?.data ? response.data : response;
+    
+    // 如果返回是字符串，尝试解析
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch (e) { return []; }
+    }
 
     if (!Array.isArray(data)) return [];
 
@@ -78,8 +82,8 @@ async function searchDoubanSuggest(keyword) {
       target: {
         id: item.id,
         title: item.title,
-        cover_url: item.pic,
-        year: item.year
+        cover_url: item.img, // 修复：suggest 接口返回的图片字段叫 img，不是 pic
+        year: item.year || ""
       }
     }));
 
@@ -90,17 +94,19 @@ async function searchDoubanSuggest(keyword) {
 }
 
 // =====================================================
-// 降级详情接口
+// 降级详情接口：subject
 // =====================================================
 async function getDoubanSubjectDetail(doubanId) {
   try {
     const url = `/subject/${doubanId}?for_mobile=1`;
 
+    // 警告：这里依然调用了 doubanApiGet (也就是 Rexxar 接口)
+    // 如果你的 IP 被 Rexxar 彻底 403，这一步必定也会 403 返回 null。
     const response = await doubanApiGet(url);
 
-    if (!response?.data) return null;
-
-    const d = response.data;
+    // 兼容提取 response 里的内容
+    const d = response?.data ? response.data : response;
+    if (!d || Object.keys(d).length === 0) return null;
 
     // 兼容成 movie detail 结构
     return {
@@ -109,7 +115,8 @@ async function getDoubanSubjectDetail(doubanId) {
         year: d.year,
         genres: d.genres || [],
         countries: d.countries || [],
-        vendors: d.vendor || d.vendors || []
+        vendors: d.vendor || d.vendors || [],
+        ...d // 把原始数据带上，防止上层脚本需要其他字段
       }
     };
 
@@ -127,8 +134,7 @@ export async function searchDoubanTitlesWithFallback(keyword, count = 20) {
   // 1️⃣ 主接口
   const primary = await searchDoubanTitles(keyword, count);
 
-  let data = primary?.data;
-
+  let data = primary?.data ? primary.data : primary;
   let tmpAnimes = [];
 
   if (data?.subjects?.items?.length > 0) {
@@ -141,11 +147,12 @@ export async function searchDoubanTitlesWithFallback(keyword, count = 20) {
 
   // 2️⃣ 主接口成功直接返回
   if (tmpAnimes.length > 0) {
+    // 保持原来的返回结构
     return primary;
   }
 
   // 3️⃣ 降级接口
-  log("warn", "[DOUBAN] fallback to subject_suggest");
+  log("warn", "[DOUBAN] Rexxar 搜索失败，启动 fallback (subject_suggest)");
 
   const fallbackItems = await searchDoubanSuggest(keyword);
 
@@ -161,14 +168,15 @@ export async function searchDoubanTitlesWithFallback(keyword, count = 20) {
 }
 
 // =====================================================
-// 🔥 对外统一：详情（主 + 降级）
+// 对外统一：详情（主 + 降级）
 // =====================================================
 export async function getDoubanDetailWithFallback(doubanId) {
 
   // 1️⃣ 主接口
   let response = await getDoubanDetail(doubanId);
+  let resData = response?.data ? response.data : response;
 
-  if (response?.data?.vendors?.length > 0) {
+  if (resData?.vendors?.length > 0) {
     return response;
   }
 
