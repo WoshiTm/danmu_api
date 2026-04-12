@@ -2,9 +2,7 @@ import { log } from './log-util.js'
 import { httpGet, httpPost } from "./http-util.js";
 import { globals } from '../configs/globals.js';
 
-// ---------------------
-// 1. 基础工具逻辑 (Rexxar API)
-// ---------------------
+// --- 基础工具：确保所有返回都经过状态检查 ---
 async function doubanApiGet(url) {
   const doubanApi = "https://m.douban.com/rexxar/api/v2";
   const headers = {
@@ -13,188 +11,123 @@ async function doubanApiGet(url) {
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Mobile/15E148 Safari/604.1"
   };
 
-  if (globals.doubanCookie) {
-    headers["Cookie"] = globals.doubanCookie;
-  }
+  if (globals.doubanCookie) headers["Cookie"] = globals.doubanCookie;
 
   try {
-    const response = await httpGet(`${doubanApi}${url}`, {
-      method: 'GET',
-      headers
-    });
-    // 注意：底层 http-util 报错时会抛出异常，进入 catch
+    const response = await httpGet(`${doubanApi}${url}`, { method: 'GET', headers });
+    // 即使是 403，也返回 response 对象供上层逻辑判断，而不是直接 throw
     return response;
   } catch (error) {
-    // 这里仅记录日志，不抛出异常，让上层逻辑继续执行 fallback
-    log("warn", `[DOUBAN] Rexxar API Request Error: ${url}`);
-    return null;
+    // 捕获网络层级的彻底失败
+    return { status: 500, data: null, error: error.message };
   }
 }
 
-// ---------------------
-// 2. 原始主接口 (Rexxar)
-// ---------------------
-export async function searchDoubanTitles(keyword, count = 20) {
-  const url = `/search?q=${encodeURIComponent(keyword)}&start=0&count=${count}`;
-  return await doubanApiGet(url);
-}
-
-export async function getDoubanDetail(doubanId) {
-  const url = `/subject/${doubanId}?for_mobile=1`;
-  return await doubanApiGet(url);
-}
-
-// ---------------------
-// 3. 🔥 降级搜索接口：subject_suggest (Web端接口)
-// ---------------------
-async function searchDoubanSuggest(keyword) {
+// --- 降级搜索：确保返回的结构与 Rexxar 尽量一致 ---
+async function doubanSuggestFallback(keyword) {
+  const url = `https://movie.douban.com/j/subject_suggest?q=${encodeURIComponent(keyword)}`;
   try {
-    const url = `https://movie.douban.com/j/subject_suggest?q=${encodeURIComponent(keyword)}`;
-    log("info", `[DOUBAN] 尝试请求 Suggest 降级接口: ${url}`);
-
-    const response = await httpGet(url, {
-      method: 'GET',
+    const res = await httpGet(url, {
+      method: "GET",
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://movie.douban.com/"
+        "Referer": "https://movie.douban.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
       }
     });
-
-    // 适配各种可能的 httpGet 返回结构 (response.data 或 response 本身)
-    let data = response?.data || response;
-    if (typeof data === 'string') {
-      try { data = JSON.parse(data); } catch(e) { return []; }
-    }
-
-    if (!Array.isArray(data)) {
-      log("warn", "[DOUBAN] Suggest 接口返回数据格式非数组");
-      return [];
-    }
-
-    // 字段映射：将 Web 端格式转换为脚本兼容的 Rexxar 格式
-    return data.map(item => ({
-      layout: "subject",
-      type_name: item.type === "movie" ? "电影" : "电视剧",
-      target_id: String(item.id),
-      target: {
-        id: String(item.id),
-        title: item.title,
-        cover_url: item.img, // 关键：Web 端接口返回的是 img 字段
-        year: item.year || "",
-        uri: `douban://douban.com/${item.type}/${item.id}`,
-        has_linewatch: true
-      }
-    }));
+    const data = res?.data || res;
+    return Array.isArray(data) ? data : [];
   } catch (error) {
-    log("error", "[DOUBAN] suggest API 请求彻底失败", error.message);
+    log("error", "[DOUBAN] Suggest Fallback Request Error:", error.message);
     return [];
   }
 }
 
-// ---------------------
-// 4. 🔥 降级详情处理
-// ---------------------
-async function getDoubanSubjectDetail(doubanId) {
-  // 详情依然只能去尝试 Rexxar，因为只有那里有播放源 (vendors)
-  const response = await getDoubanDetail(doubanId);
-  if (!response) return null;
+// --- 搜索入口：统一返回“列表数组” ---
+export async function searchDoubanTitles(keyword, count = 20) {
+  const url = `/search?q=${encodeURIComponent(keyword)}&start=0&count=${count}`;
+  const res = await doubanApiGet(url);
 
-  const d = response.data || response;
-  if (!d || Object.keys(d).length === 0) return null;
+  // 1. 如果主接口成功返回了标准 Rexxar 结构
+  if (res && res.status === 200 && res.data?.subjects?.items) {
+    return res.data.subjects.items; 
+  }
 
+  // 2. 触发降级
+  log("warn", "[DOUBAN] 主接口未命中，执行降级搜索...");
+  const fallbackList = await doubanSuggestFallback(keyword);
+  
+  // 关键：将 Suggest 的数据结构映射成主逻辑能识别的格式
+  return fallbackList.map(item => ({
+    id: String(item.id),
+    title: item.title,
+    pic: { normal: item.img }, // 对齐 Rexxar 的图片层级
+    year: item.year,
+    type: item.type,
+    // 增加一个标记，告诉下游这是降级数据
+    _is_fallback: true 
+  }));
+}
+
+// --- 获取详情：增加对 403 的处理逻辑 ---
+export async function getDoubanDetail(doubanId) {
+  const url = `/subject/${doubanId}?for_mobile=1`;
+  const res = await doubanApiGet(url);
+  
+  if (res && res.status === 200) {
+    return res.data || res;
+  }
+  
+  // 如果是 403 或其他错误，返回 null 触发 SmartDetail 的兜底
+  return null;
+}
+
+// --- 智能集成入口：确保逻辑“必须”完整走完 ---
+export async function getDoubanSmartDetail(keyword) {
+  log("info", `[DOUBAN] 开始智能详情检索: ${keyword}`);
+
+  // 1. 搜索
+  const list = await searchDoubanTitles(keyword);
+  if (!list || list.length === 0) {
+    log("error", "[DOUBAN] 搜索无任何结果返回");
+    return null;
+  }
+
+  // 2. 匹配最优 ID
+  const bestMatch = list.find(item => item.title === keyword) || list[0];
+  log("info", `[DOUBAN] 匹配到 ID: ${bestMatch.id} (${bestMatch.title})`);
+
+  // 3. 尝试详情请求
+  const detail = await getDoubanDetail(bestMatch.id);
+
+  if (detail) {
+    log("info", "[DOUBAN] 详情接口请求成功");
+    return detail;
+  }
+
+  // 4. 🔥 逻辑补全：如果详情接口没拿到数据，利用搜索阶段的“降级数据”构造一个保底对象
+  log("warn", "[DOUBAN] 详情接口无响应或 403，启动数据伪装补全流程...");
+
+  // 构造一个主脚本期望看到的完整结构，即使某些字段（如播放源）为空
   return {
-    data: {
-      ...d,
-      title: d.title,
-      year: d.year,
-      vendors: d.vendors || d.vendor || [] 
-    }
+    id: bestMatch.id,
+    title: bestMatch.title,
+    year: bestMatch.year || "",
+    pic: bestMatch.pic || { normal: "" },
+    genres: [],
+    countries: [],
+    vendors: [], // 哪怕是空的，也要给个数组，防止主脚本读取 .length 时报错
+    is_partial: true,
+    _source: "fallback_search_info"
   };
 }
 
-// ---------------------
-// 5. 🔥 对外统一导出：搜索 (主 + 降级)
-// ---------------------
-export async function searchDoubanTitlesWithFallback(keyword, count = 20) {
-  let tmpItems = [];
-  let primaryRes = null;
-
-  log("info", `[DOUBAN] --- 开始搜索流程: ${keyword} ---`);
-
-  // 1️⃣ 尝试主接口 (包裹在 try-catch 中，防止 403 直接把脚本带崩)
-  try {
-    primaryRes = await searchDoubanTitles(keyword, count);
-    if (primaryRes) {
-      const data = primaryRes.data || primaryRes;
-      if (data?.subjects?.items?.length > 0) {
-        tmpItems.push(...data.subjects.items);
-      } else if (data?.smart_box?.length > 0) {
-        tmpItems.push(...data.smart_box);
-      }
-    }
-  } catch (e) {
-    log("warn", "[DOUBAN] 主接口执行异常，已捕获并准备降级");
-  }
-
-  // 2️⃣ 如果主接口成功拿到结果，直接返回
-  if (tmpItems.length > 0) {
-    log("info", `[DOUBAN] 主接口成功返回 ${tmpItems.length} 条数据`);
-    return primaryRes;
-  }
-
-  // 3️⃣ 主接口失效，强制执行降级搜索
-  log("warn", "[DOUBAN] 主接口无有效数据 (可能是403)，强制启动降级接口...");
-  
-  try {
-    const fallbackItems = await searchDoubanSuggest(keyword);
-    log("info", `[DOUBAN] 降级搜索完毕，找到 ${fallbackItems.length} 条结果`);
-
-    return {
-      status: 200,
-      data: {
-        subjects: {
-          items: fallbackItems
-        }
-      }
-    };
-  } catch (err) {
-    log("error", "[DOUBAN] 降级链路执行失败");
-    return null;
-  }
-}
-
-// ---------------------
-// 6. 🔥 对外统一导出：详情 (主 + 降级)
-// ---------------------
-export async function getDoubanDetailWithFallback(doubanId) {
-  try {
-    const response = await getDoubanSubjectDetail(doubanId);
-    if (!response) {
-      log("error", `[DOUBAN] 无法通过详情接口获取 ID 为 ${doubanId} 的数据`);
-      return null;
-    }
-
-    const resData = response.data || response;
-    if (resData?.vendors?.length > 0) {
-      log("info", `[DOUBAN] 成功获取播放源，数量: ${resData.vendors.length}`);
-    } else {
-      log("warn", `[DOUBAN] 获取到详情但未发现播放源 (Vendors为空)`);
-    }
-    return response;
-  } catch (e) {
-    log("error", "[DOUBAN] 详情 Fallback 流程崩溃");
-    return null;
-  }
-}
-
-// ---------------------
-// 7. IMDB 接口
-// ---------------------
+// --- IMDB 反查 ---
 export async function getDoubanInfoByImdbId(imdbId) {
-  const url = `https://api.douban.com/v2/movie/imdb/${imdbId}`;
+  const doubanApi = "https://api.douban.com/v2";
   try {
-    return await httpPost(url, 
-      JSON.stringify({ apikey: "0ac44ae016490db2204ce0a042db2916" }), 
+    const response = await httpPost(
+      `${doubanApi}/movie/imdb/${imdbId}`,
+      JSON.stringify({ apikey: "0ac44ae016490db2204ce0a042db2916" }),
       {
         headers: {
           "Referer": "https://api.douban.com",
@@ -203,7 +136,8 @@ export async function getDoubanInfoByImdbId(imdbId) {
         }
       }
     );
-  } catch (e) {
+    return response;
+  } catch (error) {
     return null;
   }
 }
