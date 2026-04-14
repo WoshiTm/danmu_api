@@ -18,7 +18,7 @@ export default class VodSource extends BaseSource {
       const encodedTitle = encodeURIComponent(safeTitle);
 
       const response = await httpGet(
-        `${server}/api.php/provide/vod/?ac=detail&wd=${encodedTitle}&pg=1`,
+        `${server}/api.php/provide/vod/?wd=${encodedTitle}&ac=detail&pg=1`,
         {
           headers: {
             "Content-Type": "application/json",
